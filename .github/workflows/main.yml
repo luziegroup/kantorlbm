@@ -53,6 +53,12 @@ jobs:
         with:
           node-version: "20"
 
+      - name: Siapkan Java (dibutuhkan Firestore Emulator)
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "21"
+
       - name: Install Firebase CLI
         run: npm install -g firebase-tools
 
