@@ -1,0 +1,63 @@
+name: Cek Kode Firebase Migration
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  cek-backend-go:
+    name: Cek kode Go (backend-firebase)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ambil kode dari repo
+        uses: actions/checkout@v4
+
+      - name: Siapkan Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Download semua dependency
+        working-directory: backend-firebase
+        run: go mod tidy
+
+      - name: Cek format penulisan kode
+        working-directory: backend-firebase
+        run: |
+          UNFORMATTED=$(gofmt -l .)
+          if [ -n "$UNFORMATTED" ]; then
+            echo "File berikut belum rapi formatnya:"
+            echo "$UNFORMATTED"
+            exit 1
+          fi
+
+      - name: Coba compile (build) semua kode
+        working-directory: backend-firebase
+        run: go build ./...
+
+      - name: Cek potensi bug umum (go vet)
+        working-directory: backend-firebase
+        run: go vet ./...
+
+  cek-firestore-rules:
+    name: Cek firestore.rules (syntax)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ambil kode dari repo
+        uses: actions/checkout@v4
+
+      - name: Siapkan Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Firebase CLI
+        run: npm install -g firebase-tools
+
+      - name: Cek syntax firestore.rules lewat Emulator
+        run: |
+          firebase emulators:exec --only firestore \
+            --project demo-kantor \
+            "echo 'firestore.rules valid, emulator berhasil start'"
