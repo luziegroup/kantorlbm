@@ -1,0 +1,124 @@
+rules_version = '2';
+
+// Firestore Security Rules — equivalent of Postgres Row-Level Security in KANTOR.
+//
+// In practice, most write traffic will go through the Go backend on Cloud Run
+// using the Admin SDK, which BYPASSES these rules entirely (Admin SDK has full
+// access by design). These rules are the safety net for:
+//   1) any direct client reads (e.g. Firestore onSnapshot listeners from the
+//      frontend for realtime notifications/kanban updates)
+//   2) defense in depth in case a client-side SDK call is ever added later
+//
+// Tenant isolation: every document lives under /tenants/{tenantId}/... and the
+// caller's Firebase Auth custom claim `tenant_id` must match {tenantId}.
+// RBAC: custom claim `roles` is a map of module -> role key, and `is_super_admin`
+// is a boolean claim set only for super_admin users.
+
+function isSignedIn() {
+  return request.auth != null;
+}
+
+function claims() {
+  return request.auth.token;
+}
+
+function belongsToTenant(tenantId) {
+  return isSignedIn() && claims().tenant_id == tenantId;
+}
+
+function isSuperAdmin() {
+  return isSignedIn() && claims().is_super_admin == true;
+}
+
+// module: 'operational' | 'hris' | 'marketing' | 'admin' etc.
+// allowedRoles: array of role keys allowed to read/write (e.g. ['admin','manager'])
+function hasModuleRole(module, allowedRoles) {
+  return isSignedIn() &&
+    (claims().roles[module] in allowedRoles);
+}
+
+match /databases/{database}/documents {
+
+  match /tenants/{tenantId} {
+    allow read: if belongsToTenant(tenantId) || isSuperAdmin();
+    allow write: if isSuperAdmin(); // tenant provisioning is backend-only
+
+    // ---- Core / RBAC ----
+    match /users/{userId} {
+      allow read: if belongsToTenant(tenantId);
+      allow write: if belongsToTenant(tenantId) && hasModuleRole('admin', ['admin', 'super_admin']);
+    }
+
+    match /roles/{roleId} {
+      allow read: if belongsToTenant(tenantId);
+      allow write: if belongsToTenant(tenantId) && hasModuleRole('admin', ['admin', 'super_admin']);
+    }
+
+    match /audit_logs/{logId} {
+      allow read: if belongsToTenant(tenantId) && hasModuleRole('admin', ['admin', 'super_admin']);
+      allow write: if false; // audit logs are backend-write-only, never client-write
+    }
+
+    // ---- Operational ----
+    match /projects/{projectId} {
+      allow read: if belongsToTenant(tenantId);
+      allow write: if belongsToTenant(tenantId) &&
+        hasModuleRole('operational', ['admin', 'manager', 'super_admin']);
+
+      match /members/{memberId} {
+        allow read: if belongsToTenant(tenantId);
+        allow write: if belongsToTenant(tenantId) &&
+          hasModuleRole('operational', ['admin', 'manager', 'super_admin']);
+      }
+    }
+
+    match /kanban_tasks/{taskId} {
+      allow read: if belongsToTenant(tenantId);
+      allow write: if belongsToTenant(tenantId) &&
+        hasModuleRole('operational', ['admin', 'manager', 'staff', 'super_admin']);
+    }
+
+    // ---- HRIS (sensitive: compensation is backend-only, never direct client access) ----
+    match /employees/{employeeId} {
+      allow read: if belongsToTenant(tenantId) && hasModuleRole('hris', ['admin', 'manager', 'staff', 'super_admin']);
+      allow write: if belongsToTenant(tenantId) && hasModuleRole('hris', ['admin', 'super_admin']);
+    }
+
+    match /salaries/{salaryId} {
+      allow read, write: if false; // encrypted compensation data: backend (Admin SDK) only
+    }
+
+    match /bonuses/{bonusId} {
+      allow read, write: if false; // encrypted compensation data: backend (Admin SDK) only
+    }
+
+    // ---- Marketing ----
+    match /campaigns/{campaignId} {
+      allow read: if belongsToTenant(tenantId) && hasModuleRole('marketing', ['admin', 'manager', 'staff', 'super_admin']);
+      allow write: if belongsToTenant(tenantId) && hasModuleRole('marketing', ['admin', 'manager', 'super_admin']);
+    }
+
+    // ---- Notifications (realtime listener target — read-only from client) ----
+    match /notifications/{notifId} {
+      allow read: if belongsToTenant(tenantId) && resource.data.user_id == request.auth.uid;
+      allow write: if false; // backend-write only; client can only mark-as-read via a Cloud Run endpoint
+    }
+
+    // Catch-all for remaining tenant subcollections not explicitly listed above:
+    // default-deny direct client access; everything goes through Cloud Run + Admin SDK.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+
+  // ---- Global catalogs (read-only reference data) ----
+  match /global_modules/{moduleId} {
+    allow read: if isSignedIn();
+    allow write: if false;
+  }
+
+  match /global_permissions_v2/{permId} {
+    allow read: if isSignedIn();
+    allow write: if false;
+  }
+}
